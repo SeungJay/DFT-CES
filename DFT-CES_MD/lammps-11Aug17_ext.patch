@@ -1,0 +1,142 @@
+diff -uNr lammps-11Aug17-orig/src/domain.cpp lammps-11Aug17/src/domain.cpp
+--- lammps-11Aug17-orig/src/domain.cpp	2017-09-13 08:10:02.127519370 +0900
++++ lammps-11Aug17/src/domain.cpp	2017-09-13 08:13:25.202519206 +0900
+@@ -40,6 +40,9 @@
+ #include "math_const.h"
+ #include "memory.h"
+ #include "error.h"
++// DFT-CES start
++#include "grid.h"
++// DFT-CES end
+ 
+ using namespace LAMMPS_NS;
+ using namespace MathConst;
+@@ -102,6 +105,13 @@
+   set_lattice(2,args);
+   delete [] args;
+ 
++// DFT-CES start
++  char **args2 = new char*[1];
++  grid = NULL;
++  args2[0] = (char *) "empty";
++  set_grid(1,args2);
++  delete [] args2;
++// DFT-CES end
+   nregion = maxregion = 0;
+   regions = NULL;
+ 
+@@ -124,6 +134,9 @@
+   if (copymode) return;
+ 
+   delete lattice;
++// DFT-CES start
++  delete grid;
++// DFT-CES end
+   for (int i = 0; i < nregion; i++) delete regions[i];
+   memory->sfree(regions);
+ 
+@@ -1702,6 +1715,18 @@
+   lattice = new Lattice(lmp,narg,arg);
+ }
+ 
++// DFT-CES start
++/* ----------------------------------------------------------------------
++   create a grid
++------------------------------------------------------------------------- */
++
++void Domain::set_grid(int narg, char **arg)
++{
++  if (grid) delete grid;
++  grid = new Grid(lmp,narg,arg);
++}
++// DFT-CES end
++
+ /* ----------------------------------------------------------------------
+    create a new region
+ ------------------------------------------------------------------------- */
+diff -uNr lammps-11Aug17-orig/src/domain.h lammps-11Aug17/src/domain.h
+--- lammps-11Aug17-orig/src/domain.h	2017-09-13 08:10:02.038519370 +0900
++++ lammps-11Aug17/src/domain.h	2017-09-13 08:14:57.508519131 +0900
+@@ -87,6 +87,9 @@
+   int deform_groupbit;            // atom group to perform v remap for
+ 
+   class Lattice *lattice;                  // user-defined lattice
++// DFT-CES start
++  class Grid *grid;                        // 3d-grid for DFT-CES simulation
++// DFT-CES end
+ 
+   int nregion;                             // # of defined Regions
+   int maxregion;                           // max # list can hold
+@@ -126,6 +129,9 @@
+   int ownatom(int, double *, imageint *, int);
+   
+   void set_lattice(int, char **);
++// DFT-CES start
++  void set_grid(int, char **);
++// DFT-CES end
+   void add_region(int, char **);
+   void delete_region(int, char **);
+   int find_region(char *);
+diff -uNr lammps-11Aug17-orig/src/input.cpp lammps-11Aug17/src/input.cpp
+--- lammps-11Aug17-orig/src/input.cpp	2017-09-13 08:10:02.017519370 +0900
++++ lammps-11Aug17/src/input.cpp	2017-09-13 08:17:26.645519009 +0900
+@@ -802,6 +802,9 @@
+   else if (!strcmp(command,"kspace_modify")) kspace_modify();
+   else if (!strcmp(command,"kspace_style")) kspace_style();
+   else if (!strcmp(command,"lattice")) lattice();
++// DFT-CES start
++  else if (!strcmp(command,"grid")) grid();
++// DFT-CES end
+   else if (!strcmp(command,"mass")) mass();
+   else if (!strcmp(command,"min_modify")) min_modify();
+   else if (!strcmp(command,"min_style")) min_style();
+@@ -1620,6 +1623,13 @@
+   domain->set_lattice(narg,arg);
+ }
+ 
++// DFT-CES start
++void Input::grid()
++{
++  domain->set_grid(narg,arg);
++}
++// DFT-CES end
++
+ /* ---------------------------------------------------------------------- */
+ 
+ void Input::mass()
+diff -uNr lammps-11Aug17-orig/src/input.h lammps-11Aug17/src/input.h
+--- lammps-11Aug17-orig/src/input.h	2017-09-13 08:10:02.016519370 +0900
++++ lammps-11Aug17/src/input.h	2017-09-13 08:17:50.621518991 +0900
+@@ -111,6 +111,9 @@
+   void kspace_modify();
+   void kspace_style();
+   void lattice();
++// DFT-CES start
++  void grid();
++// DFT-CES end
+   void mass();
+   void min_modify();
+   void min_style();
+diff -uNr lammps-11Aug17-orig/src/run.cpp lammps-11Aug17/src/run.cpp
+--- lammps-11Aug17-orig/src/run.cpp	2017-09-13 08:10:02.100519370 +0900
++++ lammps-11Aug17/src/run.cpp	2017-09-13 08:19:11.430518925 +0900
+@@ -24,6 +24,9 @@
+ #include "input.h"
+ #include "timer.h"
+ #include "error.h"
++// DFT-CES start
++#include "grid.h"
++// DFT-CES end
+ 
+ using namespace LAMMPS_NS;
+ 
+@@ -182,6 +185,9 @@
+     timer->barrier_start();
+     update->integrate->run(nsteps);
+     timer->barrier_stop();
++// DFT-CES start
++    if(domain->grid->natoms != 0) domain->grid->save_grid("MDrho.cube",nsteps);
++// DFT-CES end
+ 
+     update->integrate->cleanup();
+ 

@@ -1,0 +1,31 @@
+DFT-CES install procedure for lammps-11Aug17
+
+@ lammps src dir (e.g. .../lammps-11Aug17/src/ )
+
+patch:
+patch -p2 < ../../lammps-11Aug17_ext.patch
+
+copy DFT-CES module:
+cp ../../grid.h .
+cp ../../grid.cpp .
+cp ../../fix_gridforce.h .
+cp ../../fix_gridforce.cpp .
+
+build lammps with appropriate modules and makefile
+
+DFT-CES input description
+
+command: "grid" 
+-reading QM potential cube file (unit should be Ry)
+(e.g. grid QMpot.cube )
+
+command: "fix ID group-ID gridforce scale supercell_factor"
+-adding electrostatic energy and forces to original energy and forces for given group-ID
+-scale is usually "-1" for quantum-espresso coupling. if fractional value used, MD point charges will be scaled for force calculation and MD rho average processes.
+-supercell_factor is usually "1" for molecular system, ">=1" for slab system
+-total energy from grid can be accessible through f_ID variable (add to thermo_style)
+(e.g. 
+fix          grid SOLVENT gridforce -1 1 # for SOLVENT group, scale -1, no-supercell
+fix_modify   grid energy yes             # include grid energy to lammps total energy
+)
+-When final timestep reached, "MDrho.cube" will be saved
