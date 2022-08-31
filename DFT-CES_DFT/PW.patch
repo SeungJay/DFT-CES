@@ -1,0 +1,529 @@
+diff -urN qe-6.3/PW/src/add_efield.f90 qe-6.3_ces/PW/src/add_efield.f90
+--- qe-6.3/PW/src/add_efield.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/add_efield.f90	2022-04-15 12:48:51.162370621 +0900
+@@ -59,6 +59,11 @@
+   USE fft_base,      ONLY : dfftp
+   USE mp,            ONLY : mp_bcast, mp_sum
+   USE control_flags, ONLY : iverbosity
++! DFT-CES start
++  USE scf,           ONLY : ext_ion
++  USE input_parameters, ONLY : dft_ces
++  USE scatter_mod, ONLY : gather_grid
++! DFT-CES end
+   
+   IMPLICIT NONE
+   !
+@@ -74,9 +79,17 @@
+   INTEGER :: idx,  i, j, k, j0, k0
+   INTEGER :: ir, na, ipol
+   REAL(DP) :: length, vamp, value, sawarg, bmod
++! DFT-CES start
++  REAL(DP) :: ces_dipole
++! DFT-CES end
+ 
+   LOGICAL :: first=.TRUE.
+   SAVE first
++  !
++  REAL(DP), ALLOCATABLE :: v_ext_r(:,:), ext_write_r(:), v_xyz(:,:,:)
++  INTEGER :: i1, i2, i3, ounit
++  INTEGER, EXTERNAL :: find_free_unit
++  !
+   
+   !---------------------
+   !  Execution control
+@@ -102,6 +115,9 @@
+   tot_dipole = 0._dp
+   el_dipole  = 0._dp
+   ion_dipole = 0._dp
++! DFT-CES start
++  ces_dipole = 0._dp
++! DFT-CES end
+   
+   !---------------------
+   !  Calculate dipole
+@@ -113,8 +129,12 @@
+   !
+      CALL compute_el_dip(emaxpos, eopreg, edir, rho, el_dipole)
+      CALL compute_ion_dip(emaxpos, eopreg, edir, ion_dipole)
+-    
+-     tot_dipole  = -el_dipole + ion_dipole
++! DFT-CES start
++     if (dft_ces) then
++       CALL compute_el_dip(emaxpos, eopreg, edir, ext_ion%of_r, ces_dipole)
++     endif
++     tot_dipole  = -el_dipole + ion_dipole -ces_dipole
++! DFT-CES end
+      CALL mp_bcast(tot_dipole, 0, intra_image_comm)
+   !  
+   !  E_{TOT} = -e^{2} \left( eamp - dip \right) dip \frac{\Omega}{4\pi} 
+@@ -182,6 +202,14 @@
+ 
+        IF (dipfield) then
+           WRITE( stdout,'(/5x,"Computed dipole along edir(",i1,") : ")' ) edir
++! DFT-CES start
++          if (dft_ces) then
++            WRITE( stdout, '(5X,"System dipole  ",1F15.4," Ry au, ", 1F15.4," Debye")' ) &
++     (-el_dipole+ion_dipole)*(omega/fpi), (-el_dipole+ion_dipole)*(omega/fpi)*au_debye
++            WRITE( stdout, '(8X,"CES dipole  ",1F15.4," Ry au, ", 1F15.4," Debye")' ) &
++                           -ces_dipole*(omega/fpi), -(ces_dipole*(omega/fpi)*au_debye)
++          endif
++! DFT-CES end
+ 
+           !
+           !  If verbose prints also the different components
+@@ -223,6 +251,8 @@
+ 
+   !
+   ! Loop in the charge array
++  !
++  ALLOCATE( v_ext_r(dfftp%nnr,nspin)) ! ### added for external potential write
+   j0 = dfftp%my_i0r2p ; k0 = dfftp%my_i0r3p
+   DO ir = 1, dfftp%nr1x*dfftp%my_nr2p*dfftp%my_nr3p
+      !
+@@ -248,12 +278,43 @@
+      value = e2*(eamp - tot_dipole)*saw(emaxpos,eopreg,sawarg) * (alat/bmod)
+ 
+      vpoten(ir) = vpoten(ir) + value
++     v_ext_r(ir,1) = value ! ### added for external potential write
+ 
+   END DO
+   
++  ALLOCATE( ext_write_r(dfftp%nr1x*dfftp%nr2x*dfftp%nr3x) )
++  ALLOCATE( v_xyz(dfftp%nr1x,dfftp%nr2x,dfftp%nr3x) )
++#if defined(__MPI)
++  CALL gather_grid(dfftp, v_ext_r(:,1), ext_write_r)
++#else
++     ext_write_r = v_ext_r(:,1)
++#endif
++  !
++  if (ionode) then
++     ounit = find_free_unit()
++     OPEN (unit=ounit, file='v_saw.cube',form='formatted',status='unknown')
++     !
++     i=0
++     do i3=1,dfftp%nr3x
++        do i2=1,dfftp%nr2x
++           do i1=1,dfftp%nr1x
++              i=i+1
++              v_xyz(i1,i2,i3) = ext_write_r(i)
++           end do
++        end do
++     end do
++     CALL write_cubefile_diag (v_xyz, ounit)
++     close(ounit)
++     write( stdout,*) "                                  "
++     WRITE( stdout,*)'  ## Saw potential for dipc (v_saw.cube) has been written.## '
++  end if
++  !
++  DEALLOCATE(v_ext_r)
++  DEALLOCATE(ext_write_r)
++  DEALLOCATE(v_xyz)
++  !
+   
+   RETURN
+ 
+ END SUBROUTINE add_efield
+ ! 
+-
+diff -urN qe-6.3/PW/src/allocate_fft.f90 qe-6.3_ces/PW/src/allocate_fft.f90
+--- qe-6.3/PW/src/allocate_fft.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/allocate_fft.f90	2022-04-15 12:48:51.231370623 +0900
+@@ -23,6 +23,9 @@
+   USE lsda_mod,  ONLY : nspin
+   USE spin_orb,  ONLY : domag
+   USE scf,       ONLY : rho, v, vnew, vltot, vrs, rho_core, rhog_core, &
++! DFT-CES start
++                        ext, ext_ion, ext_rep, &
++! DFT-CES end
+                         kedtau, create_scf_type
+   USE control_flags, ONLY : gamma_only
+   USE noncollin_module, ONLY : pointlist, factlist, r_loc, &
+@@ -56,6 +59,11 @@
+   CALL create_scf_type(rho)
+   CALL create_scf_type(v,    do_not_allocate_becsum = .true.)
+   CALL create_scf_type(vnew, do_not_allocate_becsum = .true.)
++! DFT-CES start
++  CALL create_scf_type(ext,  do_not_allocate_becsum = .true.)
++  CALL create_scf_type(ext_ion,  do_not_allocate_becsum = .true.)
++  CALL create_scf_type(ext_rep,  do_not_allocate_becsum = .true.)
++! DFT-CES end
+   ALLOCATE (vltot( dfftp%nnr))
+   ALLOCATE (rho_core( dfftp%nnr))
+   IF (dft_is_meta() ) THEN
+diff -urN qe-6.3/PW/src/clean_pw.f90 qe-6.3_ces/PW/src/clean_pw.f90
+--- qe-6.3/PW/src/clean_pw.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/clean_pw.f90	2022-04-15 12:48:51.218370623 +0900
+@@ -34,6 +34,9 @@
+   USE wvfct,                ONLY : g2kin, et, wg, btype
+   USE force_mod,            ONLY : force
+   USE scf,                  ONLY : rho, v, vltot, rho_core, rhog_core, &
++! DFT-CES start
++                                   ext, ext_ion, ext_rep, &
++! DFT-CES end
+                                    vrs, kedtau, destroy_scf_type, vnew
+   USE symm_base,            ONLY : irt
+   USE symme,                ONLY : sym_rho_deallocate
+@@ -126,6 +129,11 @@
+   call destroy_scf_type(rho)
+   call destroy_scf_type(v)
+   call destroy_scf_type(vnew)
++! DFT-CES start
++  call destroy_scf_type(ext)
++  call destroy_scf_type(ext_ion)
++  call destroy_scf_type(ext_rep)
++! DFT-CES end
+   IF ( ALLOCATED( kedtau ) )     DEALLOCATE( kedtau )
+   IF ( ALLOCATED( vltot ) )      DEALLOCATE( vltot )
+   IF ( ALLOCATED( rho_core ) )   DEALLOCATE( rho_core )
+diff -urN qe-6.3/PW/src/electrons.f90 qe-6.3_ces/PW/src/electrons.f90
+--- qe-6.3/PW/src/electrons.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/electrons.f90	2022-04-15 12:48:51.226370623 +0900
+@@ -401,6 +401,10 @@
+   USE wrappers,             ONLY : memstat
+   !
+   USE plugin_variables,     ONLY : plugin_etot
++! DFT-CES start
++  USE input_parameters,     ONLY : dft_ces
++  USE ener,                 ONLY : E_ces
++! DFT-CES end
+   !
+   IMPLICIT NONE
+   !
+@@ -837,6 +841,12 @@
+      ENDIF
+      !
+      ! ... adds possible external contribution from plugins to the energy
++! DFT-CES start
++     if ( dft_ces ) then
++       etot = etot + E_ces
++       hwf_energy = hwf_energy + E_ces
++     endif
++! DFT-CES end
+      !
+      etot = etot + plugin_etot 
+      !
+@@ -1202,6 +1212,9 @@
+           ! ... contribution.
+           !
+           IF ( lfcpopt .or. lfcpdyn ) WRITE( stdout, 9072 ) ef*tot_charge
++! DFT-CES start
++          if ( dft_ces ) write(stdout, 9086) E_ces
++! DFT-CES end
+           !
+        ELSE IF ( conv_elec ) THEN
+           !
+@@ -1278,6 +1291,9 @@
+             /'     Harris-Foulkes estimate   =',0PF17.8,' Ry' &
+             /'     estimated scf accuracy    <',1PE17.1,' Ry' )
+ 9085 FORMAT(/'     total all-electron energy =',0PF17.6,' Ry' )
++! DFT-CES start
++9086 FORMAT(/'     DFT-CES energy            =',F17.8,' Ry' )
++! DFT-CES end
+ 
+   END SUBROUTINE print_energies
+   !
+diff -urN qe-6.3/PW/src/forces.f90 qe-6.3_ces/PW/src/forces.f90
+--- qe-6.3/PW/src/forces.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/forces.f90	2022-04-15 12:48:51.237370623 +0900
+@@ -57,6 +57,9 @@
+   USE tsvdw_module,  ONLY : FtsvdW
+   USE esm,           ONLY : do_comp_esm, esm_bc, esm_force_ew
+   USE qmmm,          ONLY : qmmm_mode
++! DFT-CES start
++  USE input_parameters, ONLY : dft_ces
++! DFT-CES end
+   !
+   IMPLICIT NONE
+   !
+@@ -70,6 +73,9 @@
+                            force_mt(:,:), &
+                            forcescc(:,:), &
+                            forces_bp_efield(:,:), &
++! DFT-CES start
++                           force_ces(:,:), &
++! DFT-CES end
+                            forceh(:,:)
+     ! nonlocal, local, core-correction, ewald, scf correction terms, and hubbard
+ !
+@@ -92,11 +98,17 @@
+   CALL start_clock( 'forces' )
+   !
+   ALLOCATE( forcenl( 3, nat ), forcelc( 3, nat ), forcecc( 3, nat ), &
++! DFT-CES start
++            force_ces( 3, nat), &
++! DFT-CES end
+             forceh( 3, nat ), forceion( 3, nat ), forcescc( 3, nat ) )
+   !    
+   forcescc(:,:) = 0.D0
+   forceh(:,:)   = 0.D0
+   force (:,:)   = 0.D0
++! DFT-CES start
++  force_ces(:,:) = 0.D0
++! DFT-CES end
+   !
+   ! ... The nonlocal contribution is computed here
+   !
+@@ -194,6 +206,11 @@
+      endif
+   endif
+   !
++! DFT-CES start
++  if ( dft_ces ) then
++     call ces_force( force_ces )
++  endif
++! DFT-CES end
+   ! ... here we sum all the contributions and compute the total force acting
+   ! ... on the crystal
+   !
+@@ -220,6 +237,9 @@
+         IF ( gate ) force(ipol,na) = force(ipol,na) + forcegate(ipol,na) ! TB
+         IF (lelfield)  force(ipol,na) = force(ipol,na) + forces_bp_efield(ipol,na)
+         IF (do_comp_mt)force(ipol,na) = force(ipol,na) + force_mt(ipol,na) 
++! DFT-CES start
++        if ( dft_ces ) force(ipol,na) = force(ipol,na) + force_ces(ipol,na)
++! DFT-CES end
+ 
+         sumfor = sumfor + force(ipol,na)
+         !
+diff -urN qe-6.3/PW/src/input.f90 qe-6.3_ces/PW/src/input.f90
+--- qe-6.3/PW/src/input.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/input.f90	2022-04-15 12:48:51.218370623 +0900
+@@ -220,6 +220,9 @@
+                                gdir, nppstr, wf_collect,lelfield,lorbm,efield, &
+                                nberrycyc, lkpoint_dir, efield_cart, lecrpa,    &
+                                vdw_table_name, memory, max_seconds, tqmmm,     &
++! DFT-CES start
++                               dft_ces, rho_ces, rho_ces_ion, rho_ces_rep,     &
++! DFT-CES end
+                                efield_phase, gate
+ 
+   !
+diff -urN qe-6.3/PW/src/make.depend qe-6.3_ces/PW/src/make.depend
+--- qe-6.3/PW/src/make.depend	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/make.depend	2022-04-15 12:48:51.241370623 +0900
+@@ -37,6 +37,7 @@
+ add_efield.o : ../../UtilXlib/mp.o
+ add_efield.o : extfield.o
+ add_efield.o : pwcom.o
++add_efield.o : dft_ces.o
+ add_gatefield.o : ../../Modules/cell_base.o
+ add_gatefield.o : ../../Modules/constants.o
+ add_gatefield.o : ../../Modules/control_flags.o
+@@ -470,6 +471,16 @@
+ ewald_dipole.o : ../../UtilXlib/mp.o
+ ewald_dipole.o : pwcom.o
+ extfield.o : ../../Modules/kind.o
++dft_ces.o : scf_mod.o
++dft_ces.o : ../../Modules/kind.o
++dft_ces.o : ../../FFTXlib/scatter_mod.o
++dft_ces.o : ../../FFTXlib/fft_interfaces.o
++dft_ces.o : ../../Modules/input_parameters.o
++dft_ces.o : ../../Modules/wavefunctions.o
++dft_ces.o : ../../Modules/io_global.o
++dft_ces.o : ../../Modules/ions_base.o
++dft_ces.o : ../../Modules/cell_base.o
++dft_ces.o : ../../Modules/mp_bands.o
+ exx.o : ../../FFTXlib/fft_interfaces.o
+ exx.o : ../../FFTXlib/fft_types.o
+ exx.o : ../../FFTXlib/scatter_mod.o
+@@ -2208,6 +2219,7 @@
+ utils.o : ../../Modules/noncol.o
+ utils.o : pwcom.o
+ v_of_rho.o : ../../FFTXlib/fft_interfaces.o
++v_of_rho.o : ../../FFTXlib/scatter_mod.o
+ v_of_rho.o : ../../Modules/cell_base.o
+ v_of_rho.o : ../../Modules/constants.o
+ v_of_rho.o : ../../Modules/control_flags.o
+diff -urN qe-6.3/PW/src/Makefile qe-6.3_ces/PW/src/Makefile
+--- qe-6.3/PW/src/Makefile	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/Makefile	2022-04-15 12:48:51.232370623 +0900
+@@ -74,6 +74,7 @@
+ extfield.o \
+ exx_base.o \
+ exx_band.o \
++dft_ces.o \
+ exx.o \
+ fcp.o \
+ find_group.o \
+diff -urN qe-6.3/PW/src/potinit.f90 qe-6.3_ces/PW/src/potinit.f90
+--- qe-6.3/PW/src/potinit.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/potinit.f90	2022-04-15 12:48:51.230370623 +0900
+@@ -36,6 +36,9 @@
+   USE gvecs,                ONLY : doublegrid
+   USE control_flags,        ONLY : lscf, gamma_only
+   USE scf,                  ONLY : rho, rho_core, rhog_core, &
++! DFT-CES start
++                                   ext, &
++! DFT-CES end
+                                    vltot, v, vrs, kedtau
+   USE funct,                ONLY : dft_is_meta
+   USE wavefunctions_module, ONLY : psic
+@@ -60,6 +63,9 @@
+   USE paw_variables,        ONLY : okpaw, ddd_PAW
+   USE paw_init,             ONLY : PAW_atomic_becsum
+   USE paw_onecenter,        ONLY : PAW_potential
++! DFT-CES start
++  USE input_parameters,     ONLY : dft_ces
++! DFT-CES end
+   !
+   IMPLICIT NONE
+   !
+@@ -236,6 +242,13 @@
+   ! ... plugin contribution to local potential
+   !
+   CALL plugin_scf_potential(rho,.FALSE.,-1.d0,vltot)
++  ! DFT-CES start
++  ! change the order of DFT-CES init for advoiding initial unstable electron distribution under dipole correction for charged
++  ! systems. | mino 22.01.15
++  if ( dft_ces ) then
++      call init_ces()
++  endif
++  ! DFT-CES end
+   !
+   ! ... compute the potential and store it in v
+   !
+@@ -262,6 +275,11 @@
+      ENDIF
+      !
+   END IF
++!! DFT-CES start
++!  if ( dft_ces ) then
++!     call init_ces()
++!  endif
++!! DFT-CES end
+   !
+   IF ( report /= 0 .AND. &
+        noncolin .AND. domag .AND. lscf ) CALL report_mag()
+diff -urN qe-6.3/PW/src/pwcom.f90 qe-6.3_ces/PW/src/pwcom.f90
+--- qe-6.3/PW/src/pwcom.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/pwcom.f90	2022-04-15 12:48:51.238370623 +0900
+@@ -242,6 +242,9 @@
+        exdm,           &! the XDM dispersion energy
+        demet,          &! variational correction ("-TS") for metals
+        epaw,           &! sum of one-center paw contributions
++! DFT-CES start
++       E_ces,          &! the DFT-CES electrostatic interaction energy
++! DFT-CES end
+        ef, ef_up, ef_dw ! the fermi energy (up and dw if two_fermi_energies=.T.)
+   !
+ END MODULE ener
+diff -urN qe-6.3/PW/src/scf_mod.f90 qe-6.3_ces/PW/src/scf_mod.f90
+--- qe-6.3/PW/src/scf_mod.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/scf_mod.f90	2022-04-15 12:48:51.232370623 +0900
+@@ -29,6 +29,9 @@
+   USE uspp_param,   ONLY : nhm
+   USE extfield,     ONLY : dipfield, emaxpos, eopreg, edir
+   USE control_flags,ONLY : lxdm
++! DFT-CES start
++  USE input_parameters, ONLY : dft_ces
++! DFT-CES end
+   !
+   SAVE
+   !
+@@ -65,6 +68,11 @@
+   type (scf_type) :: rho  ! the charge density and its other components
+   type (scf_type) :: v    ! the scf potential
+   type (scf_type) :: vnew ! used to correct the forces
++! DFT-CES start
++  type (scf_type) :: ext  ! MD rho(of_r&of_g) and potential(kin_r)
++  type (scf_type) :: ext_ion ! MD rho(of_r&of_g) and potential(kin_r)
++  type (scf_type) :: ext_rep ! MD rho(of_r&of_g) and potential(kin_r)
++! DFT-CES end
+ 
+   REAL(DP) :: v_of_0    ! vltot(G=0)      
+   REAL(DP), ALLOCATABLE :: &
+@@ -92,7 +100,7 @@
+    LOGICAL                     :: allocate_becsum        ! PAW hack
+    allocate ( rho%of_r( dfftp%nnr, nspin) )
+    allocate ( rho%of_g( ngm, nspin ) )
+-   if (dft_is_meta() .or. lxdm) then
++   if (dft_is_meta() .or. lxdm .or. dft_ces) then
+       allocate ( rho%kin_r( dfftp%nnr, nspin) )
+       allocate ( rho%kin_g( ngm, nspin ) )
+    else
+diff -urN qe-6.3/PW/src/v_of_rho.f90 qe-6.3_ces/PW/src/v_of_rho.f90
+--- qe-6.3/PW/src/v_of_rho.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PW/src/v_of_rho.f90	2022-04-15 12:48:51.234370623 +0900
+@@ -26,6 +26,10 @@
+   USE cell_base,        ONLY : alat
+   USE control_flags,    ONLY : ts_vdw
+   USE tsvdw_module,     ONLY : tsvdw_calculate, UtsvdW
++! DFT-CES start
++  USE scf,              ONLY : ext
++  USE input_parameters, ONLY : dft_ces
++! DFT-CES end
+   !
+   IMPLICIT NONE
+   !
+@@ -79,6 +83,11 @@
+      endif
+   endif
+   !
++! DFT-CES start
++  if ( dft_ces ) then
++     call v_ces( v%of_r )
++  endif
++! DFT-CES end
+   ! ... add an electric field
+   ! 
+   DO is = 1, nspin_lsda
+@@ -552,6 +561,9 @@
+   USE esm,       ONLY: do_comp_esm, esm_hartree, esm_bc
+   USE Coul_cut_2D, ONLY : do_cutoff_2D, cutoff_2D, cutoff_hartree  
+   !
++  USE io_global,   ONLY : ionode, stdout
++  USE scatter_mod, ONLY : gather_grid
++  !
+   IMPLICIT NONE
+   !
+   COMPLEX(DP), INTENT(IN)  :: rhog(ngm,nspin)
+@@ -565,6 +577,10 @@
+   COMPLEX(DP), ALLOCATABLE :: aux(:), rgtot(:), vaux(:)
+   INTEGER               :: nt
+   !
++  REAL(DP), ALLOCATABLE :: ext_write_r(:), v_xyz(:,:,:)
++  INTEGER :: i, i1, i2, i3, ounit
++  INTEGER, EXTERNAL :: find_free_unit
++  !
+   CALL start_clock( 'v_h' )
+   !
+   ALLOCATE( aux( dfftp%nnr ), aux1( 2, ngm ) )
+@@ -680,6 +696,38 @@
+      !
+   END IF
+   !
++  ALLOCATE( ext_write_r(dfftp%nr1x*dfftp%nr2x*dfftp%nr3x) )
++  ALLOCATE( v_xyz(dfftp%nr1x,dfftp%nr2x,dfftp%nr3x) )
++#if defined(__MPI)
++  CALL gather_grid(dfftp, REAL(aux(:)), ext_write_r)
++#else
++  ext_write_r = REAL(aux(:))
++#endif
++  !
++  if (ionode) then
++     ounit = find_free_unit()
++     OPEN (unit=ounit, file='v_hartree.cube',form='formatted',status='unknown')
++     !
++     i=0
++     do i3=1,dfftp%nr3x
++        do i2=1,dfftp%nr2x
++           do i1=1,dfftp%nr1x
++              i=i+1
++              v_xyz(i1,i2,i3) = ext_write_r(i)
++           end do
++        end do
++     end do
++     CALL write_cubefile_diag (v_xyz, ounit)
++     close(ounit)
++     write( stdout,*) "                                  "
++     WRITE( stdout,*)'  ## Hartree pot for val. elec. (v_hartree.cube) has been written. ## '
++  end if
++  !
++  DEALLOCATE(ext_write_r)
++  DEALLOCATE(v_xyz)
++  !
++
++  !
+   DEALLOCATE( aux, aux1 )
+   !
+   CALL stop_clock( 'v_h' )

@@ -1,0 +1,16 @@
+diff -urN qe-6.3/PP/src/punch_plot.f90 qe-6.3_ces/PP/src/punch_plot.f90
+--- qe-6.3/PP/src/punch_plot.f90	2018-07-07 00:36:48.000000000 +0900
++++ qe-6.3_ces/PP/src/punch_plot.f90	2022-04-15 12:48:40.701370263 +0900
+@@ -214,8 +214,10 @@
+         nspin = 1
+      ENDIF
+      CALL v_h (rho%of_g, ehart, charge, raux)
+-     IF (tefield.and.dipfield) CALL add_efield(raux,dummy,rho%of_r,.true.)
+-
++     !IF (tefield.and.dipfield) CALL add_efield(raux,dummy,rho%of_r,.true.)
++     IF (tefield.and.dipfield) THEN
++        WRITE(stdout,*) "V_hartree and V_bare is shown but V_saw is printed in pw by jay"
++     ENDIF
+   ELSEIF (plot_num == 12) THEN
+ 
+      raux=0.d0
