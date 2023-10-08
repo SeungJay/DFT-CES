@@ -1,0 +1,42 @@
+#DFT-CES install procedure for QE7.2
+
+0.1 wget https://gitlab.com/QEF/q-e/-/archive/qe-7.2/q-e-qe-7.2.tar.gz 
+0.2 tar -xvf q-e-qe-7.2.tar.gz
+0.3 cd q-e-qe-7.2
+
+1.configure with your options and make.inc at Topdir (e.g. ./configure ....)
+
+2.Go to the Modules dir (e.g. .../qe7.2/Modules)
+patch -p2 < ../../Mod.patch
+
+3.Go to the PW/src dir (e.g. .../qe7.2/PW/src/ )
+rm -f make.depend (from qe7, make.depend is created in configure step)
+patch -p3 < ../../../PW.patch
+
+4. Go to the PP/src dir (e.g. .../qe7.2/PP/src/ )
+rm -f make.depend (from qe7, make.depend is created in configure step)
+patch -p3 < ../../../PP.patch
+# The PP patch file should be used carefully.
+# When this patch is applied, the dipole correction potential is not plotted together. 
+# Please compare the results and use this. 
+
+command: "dft_ces"
+-it turns the dft_ces when used like this.
+"dft_ces = .true."
+
+command: "rho_ces_rep"
+-it is under development so this should be used like this.
+"rho_ces_rep = './empty.cube'"
+-the empty.cube means the cube file that has all zero value.
+
+command: "rho_ces_ion"
+-here, the MD charge density cube file and can be used like this.
+"rho_ces_ion = './MOBILE_final.cube'"
+
+command: "rho_ces"
+-it is optional so usually used like this.
+"rho_ces = './empty.cube'"
+-the empty.cube is the cube file that has all zero value.
+-this charge density is not contained for the dipole correction.
+-please carefully use this.
+
