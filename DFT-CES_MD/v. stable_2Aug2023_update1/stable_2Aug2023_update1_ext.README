@@ -1,6 +1,7 @@
 DFT-CES install procedure for stable_2Aug2023_update1
 
-@ lammps src dir (e.g. .../stable_2Aug2023_update1/src)
+1. git clone --depth=1 --branch stable_2Aug2023_update1 https://github.com/lammps/lammps.git stable_2Aug2023_update1
+2. cd stable_2Aug2023_update1/src
 
 patch:
 patch -p2 < ../../stable_2Aug2023_update1_ext.patch
