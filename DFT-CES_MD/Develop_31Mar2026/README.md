@@ -56,7 +56,7 @@ atom_style      charge
 read_data       data.lammps          # atoms as: id type q x y z
 # ... set charges (from QM) ...
 
-pair_style      mliap unified <model>.model-mliap_lammps.pt 0
+pair_style      mliap unified <model>.model-mliap_lammps.pt
 pair_coeff      * * <elements>
 
 group           mob type <...>
